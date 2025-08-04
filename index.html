@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2563eb">
+    <title>Montaj Hattı Takip</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    
+    <!-- Icons -->
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    
+    <style>
+        .loader {
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #2563eb;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .install-prompt {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background: #2563eb;
+            color: white;
+            padding: 16px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+            transform: translateY(100px);
+            transition: transform 0.3s ease;
+        }
+        .install-prompt.show {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app"></div>
+    
+    <!-- PWA Install Prompt -->
+    <div id="installPrompt" class="install-prompt">
+        <div class="flex items-center justify-between">
+            <div class="flex-1">
+                <h3 class="font-semibold text-sm">Ana Ekrana Ekle</h3>
+                <p class="text-xs opacity-90">Daha kolay erişim için uygulamayı yükleyin</p>
+            </div>
+            <div class="flex space-x-2 ml-4">
+                <button id="installBtn" class="bg-white text-blue-600 px-3 py-1 rounded text-sm font-medium">
+                    Yükle
+                </button>
+                <button id="dismissBtn" class="text-white/80 px-3 py-1 rounded text-sm">
+                    Kapat
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyCFfnHfNfQK57V-misunfZ3YGkkq5-MyQA",
+            authDomain: "montaj-hatti-takip.firebaseapp.com",
+            projectId: "montaj-hatti-takip",
+            storageBucket: "montaj-hatti-takip.firebasestorage.app",
+            messagingSenderId: "1035235222376",
+            appId: "1:1035235222376:web:7255440a6716ee9d352cdd"
+        };
+
+        // Firebase Initialize
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        // PWA Install Logic
+        let deferredPrompt;
+        const installPrompt = document.getElementById('installPrompt');
+        const installBtn = document.getElementById('installBtn');
+        const dismissBtn = document.getElementById('dismissBtn');
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            installPrompt.classList.add('show');
+        });
+
+        installBtn.addEventListener('click', () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                deferredPrompt.userChoice.then(() => {
+                    deferredPrompt = null;
+                    installPrompt.classList.remove('show');
+                });
+            }
+        });
+
+        dismissBtn.addEventListener('click', () => {
+            installPrompt.classList.remove('show');
+        });
+
+        // Service Worker Registration
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('sw.js')
+                    .then((registration) => {
+                        console.log('SW registered: ', registration);
+                    })
+                    .catch((registrationError) => {
+                        console.log('SW registration failed: ', registrationError);
+                    });
+            });
+        }
+
+        // Main App Class
+        class MontajHattiApp {
+            constructor() {
+                this.currentUser = null;
+                this.activeDowntime = null;
+                this.downtimes = [];
+                this.showAdminPanel = false;
+                this.filters = {
+                    operator: '',
+                    reason: '',
+                    floor: '',
+                    startDate: '',
+                    endDate: ''
+                };
+                
+                this.operators = [
+                    { id: 1, name: 'Berkan & Süleyman', pin: '1234' },
+                    { id: 2, name: 'Okan & Umut', pin: '2345' },
+                    { id: 3, name: 'Caner & Arif', pin: '3456' },
+                    { id: 4, name: 'Emre & Göksel', pin: '4567' }
+                ];
+                
+                this.admin = { name: 'Fatih', pin: 'admin' };
+                
+                this.downtimeReasons = [
+                    'Bakım ',
+                    'DÜS',
+                    'ÜMY',
+                    'KGY',
+                    'ÜPY',
+                    'Diğer'
+                ];
+                
+                this.floors = ['A Bandı', 'B Bandı'];
+                
+                this.init();
+            }
+
+            async init() {
+                try {
+                    await auth.signInAnonymously();
+                    await this.loadDowntimes();
+                    this.setupRealtimeListener();
+                    this.render();
+                } catch (error) {
+                    console.error('Initialization error:', error);
+                    document.getElementById('app').innerHTML = `
+                        <div class="min-h-screen flex items-center justify-center p-4">
+                            <div class="text-center">
+                                <h2 class="text-xl font-bold text-red-600 mb-2">Bağlantı Hatası</h2>
+                                <p class="text-gray-600">Firebase bağlantısı kurulamadı. Lütfen internet bağlantınızı kontrol edin.</p>
+                                <button onclick="location.reload()" class="mt-4 bg-blue-600 text-white px-4 py-2 rounded">Tekrar Dene</button>
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+
+            async loadDowntimes() {
+                try {
+                    const snapshot = await db.collection('downtimes')
+                        .orderBy('startTime', 'desc')
+                        .limit(100)
+                        .get();
+                    
+                    this.downtimes = snapshot.docs.map(doc => {
+                        const data = doc.data();
+                        return {
+                            id: doc.id,
+                            ...data,
+                            startTime: data.startTime.toDate(),
+                            endTime: data.endTime ? data.endTime.toDate() : null
+                        };
+                    });
+                } catch (error) {
+                    console.error('Error loading downtimes:', error);
+                    this.downtimes = [];
+                }
+            }
+
+            setupRealtimeListener() {
+                db.collection('downtimes')
+                    .orderBy('startTime', 'desc')
+                    .limit(100)
+                    .onSnapshot((snapshot) => {
+                        this.downtimes = snapshot.docs.map(doc => {
+                            const data = doc.data();
+                            return {
+                                id: doc.id,
+                                ...data,
+                                startTime: data.startTime.toDate(),
+                                endTime: data.endTime ? data.endTime.toDate() : null
+                            };
+                        });
+                        this.render();
+                    });
+            }
+
+            async saveDowntime(downtime) {
+                try {
+                    const docData = {
+                        ...downtime,
+                        startTime: firebase.firestore.Timestamp.fromDate(downtime.startTime),
+                        endTime: downtime.endTime ? firebase.firestore.Timestamp.fromDate(downtime.endTime) : null
+                    };
+                    
+                    if (downtime.id && typeof downtime.id === 'string') {
+                        await db.collection('downtimes').doc(downtime.id).update(docData);
+                    } else {
+                        const docRef = await db.collection('downtimes').add(docData);
+                        downtime.id = docRef.id;
+                    }
+                } catch (error) {
+                    console.error('Error saving downtime:', error);
+                    alert('Veri kaydedilirken hata oluştu. İnternet bağlantınızı kontrol edin.');
+                }
+            }
+
+            handleLogin(pin) {
+                const operator = this.operators.find(op => op.pin === pin);
+                if (operator) {
+                    this.currentUser = { ...operator, role: 'operator' };
+                } else if (pin === this.admin.pin) {
+                    this.currentUser = { ...this.admin, role: 'admin' };
+                    this.showAdminPanel = true;
+                } else {
+                    alert('Geçersiz PIN!');
+                    return;
+                }
+                this.render();
+            }
+
+            handleLogout() {
+                this.currentUser = null;
+                this.activeDowntime = null;
+                this.showAdminPanel = false;
+                this.render();
+            }
+
+            async startDowntime(reason, floor) {
+                const newDowntime = {
+                    operatorId: this.currentUser.id,
+                    operatorName: this.currentUser.name,
+                    startTime: new Date(),
+                    endTime: null,
+                    reason,
+                    floor,
+                    comment: '',
+                    duration: 0
+                };
+                
+                this.activeDowntime = newDowntime;
+                await this.saveDowntime(newDowntime);
+                this.render();
+            }
+
+            async endDowntime(comment) {
+                if (this.activeDowntime) {
+                    const endTime = new Date();
+                    const duration = Math.round((endTime - this.activeDowntime.startTime) / 1000 / 60);
+                    
+                    const completedDowntime = {
+                        ...this.activeDowntime,
+                        endTime,
+                        comment,
+                        duration
+                    };
+                    
+                    await this.saveDowntime(completedDowntime);
+                    this.activeDowntime = null;
+                    this.render();
+                }
+            }
+
+            exportToExcel() {
+                const filteredData = this.getFilteredDowntimes();
+                const csvContent = [
+                    ['Operatör', 'Tarih', 'Süre (dk)', 'Bölüm', 'Bant', 'Yorum'],
+                    ...filteredData.map(dt => [
+                        dt.operatorName,
+                        `${dt.startTime.toLocaleDateString('tr-TR')} ${dt.startTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })} - ${dt.endTime ? dt.endTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : 'Devam ediyor'}`,
+                        dt.duration,
+                        dt.reason,
+                        dt.floor,
+                        dt.comment || ''
+                    ])
+                ].map(row => row.join(',')).join('\n');
+
+                const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `montaj_hatti_duruslar_${new Date().toISOString().split('T')[0]}.csv`;
+                link.click();
+            }
+
+            getFilteredDowntimes() {
+                return this.downtimes.filter(dt => {
+                    return (!this.filters.operator || dt.operatorName.includes(this.filters.operator)) &&
+                           (!this.filters.reason || dt.reason === this.filters.reason) &&
+                           (!this.filters.floor || dt.floor === this.filters.floor) &&
+                           (!this.filters.startDate || dt.startTime >= new Date(this.filters.startDate)) &&
+                           (!this.filters.endDate || dt.startTime <= new Date(this.filters.endDate));
+                });
+            }
+
+            formatTime(date) {
+                return date.toLocaleString('tr-TR', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            }
+
+            formatDuration(minutes) {
+                const hours = Math.floor(minutes / 60);
+                const mins = minutes % 60;
+                return hours > 0 ? `${hours}s ${mins}dk` : `${mins}dk`;
+            }
+
+            render() {
+                const app = document.getElementById('app');
+                
+                if (!this.currentUser) {
+                    app.innerHTML = this.renderLogin();
+                } else if (this.showAdminPanel) {
+                    app.innerHTML = this.renderAdminPanel();
+                } else {
+                    app.innerHTML = this.renderOperatorPanel();
+                }
+                
+                this.attachEventListeners();
+            }
+
+            renderLogin() {
+                return `
+                    <div class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+                        <div class="bg-white rounded-xl shadow-xl p-8 w-full max-w-md">
+                            <div class="text-center mb-8">
+                                <div class="bg-blue-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                                    <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                                    </svg>
+                                </div>
+                                <h1 class="text-2xl font-bold text-gray-800 mb-2">Montaj Hattı</h1>
+                                <p class="text-gray-600">Duruş Takip Sistemi</p>
+                            </div>
+                            
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">PIN Kodunuz</label>
+                                    <input
+                                        type="password"
+                                        id="pinInput"
+                                        class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-lg tracking-widest"
+                                        placeholder="••••"
+                                        maxlength="6"
+                                    />
+                                </div>
+                                <button
+                                    id="loginBtn"
+                                    class="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium"
+                                >
+                                    Giriş Yap
+                                </button>
+                                <div class="text-xs text-gray-500 text-center mt-4">
+                                    <p>Operatör PINleri:</p>
+                                    <p>1234: Berkan & Süleyman</p>
+                                    <p>2345: Okan & Umut</p>
+                                    <p>3456: Caner & Arif</p>
+                                    <p>4567: Emre & Göksel</p>
+                                    <p>Yönetici: admin</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderOperatorPanel() {
+                return `
+                    <div class="p-6">
+                        <div class="bg-white rounded-xl shadow-sm p-6 mb-6">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-3">
+                                    <div class="bg-blue-600 w-12 h-12 rounded-full flex items-center justify-center">
+                                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                        </svg>
+                                    </div>
+                                    <div>
+                                        <h1 class="text-xl font-bold text-gray-800">Hoş geldiniz, ${this.currentUser.name}</h1>
+                                        <p class="text-gray-600">Operatör Paneli</p>
+                                    </div>
+                                </div>
+                                <button id="logoutBtn" class="text-gray-500 hover:text-gray-700 transition-colors">
+                                    Çıkış
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm p-6">
+                            <div class="text-center">
+                                ${this.activeDowntime ? `
+                                    <div class="space-y-4">
+                                        <div class="bg-red-100 text-red-800 px-4 py-2 rounded-lg inline-block">
+                                            <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            Duruş Aktif
+                                        </div>
+                                        <div class="space-y-2">
+                                            <p class="font-medium">${this.activeDowntime.reason}</p>
+                                            <p class="text-sm text-gray-600">${this.activeDowntime.floor}</p>
+                                            <p class="text-sm text-gray-500">Başlangıç: ${this.formatTime(this.activeDowntime.startTime)}</p>
+                                        </div>
+                                        <button id="endDowntimeBtn" class="bg-red-600 text-white px-6 py-3 rounded-lg hover:bg-red-700 transition-colors flex items-center space-x-2 mx-auto">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path>
+                                            </svg>
+                                            <span>Duruşu Bitir</span>
+                                        </button>
+                                    </div>
+                                ` : `
+                                    <div class="space-y-4">
+                                        <div class="bg-green-100 text-green-800 px-4 py-2 rounded-lg inline-block">
+                                            ✓ Üretim Aktif
+                                        </div>
+                                        <button id="startDowntimeBtn" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2 mx-auto">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h8m-9-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <span>Duruş Başlat</span>
+                                        </button>
+                                    </div>
+                                `}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderAdminPanel() {
+                const filteredData = this.getFilteredDowntimes();
+                const totalDuration = filteredData.reduce((sum, dt) => sum + dt.duration, 0);
+
+                return `
+                    <div class="p-6">
+                        <div class="bg-white rounded-xl shadow-sm p-6 mb-6">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-3">
+                                    <div class="bg-green-600 w-12 h-12 rounded-full flex items-center justify-center">
+                                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                                        </svg>
+                                    </div>
+                                    <div>
+                                        <h1 class="text-xl font-bold text-gray-800">Yönetici Paneli</h1>
+                                        <p class="text-gray-600">Fatih - Duruş Takip Raporu</p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center space-x-3">
+                                    <button id="exportBtn" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors flex items-center space-x-2">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                        </svg>
+                                        <span>Excel İndir</span>
+                                    </button>
+                                    <button id="logoutBtn" class="text-gray-500 hover:text-gray-700 transition-colors">Çıkış</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <div class="bg-white rounded-xl shadow-sm p-6">
+                                <h3 class="text-sm font-medium text-gray-500 mb-2">Toplam Duruş</h3>
+                                <p class="text-2xl font-bold text-gray-800">${filteredData.length}</p>
+                            </div>
+                            <div class="bg-white rounded-xl shadow-sm p-6">
+                                <h3 class="text-sm font-medium text-gray-500 mb-2">Toplam Süre</h3>
+                                <p class="text-2xl font-bold text-gray-800">${this.formatDuration(totalDuration)}</p>
+                            </div>
+                            <div class="bg-white rounded-xl shadow-sm p-6">
+                                <h3 class="text-sm font-medium text-gray-500 mb-2">Ortalama Süre</h3>
+                                <p class="text-2xl font-bold text-gray-800">
+                                    ${filteredData.length > 0 ? this.formatDuration(Math.round(totalDuration / filteredData.length)) : '0dk'}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm p-6 mb-6">
+                            <h3 class="text-lg font-medium mb-4">Filtreler</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                                <select id="operatorFilter" class="border rounded-lg px-3 py-2">
+                                    <option value="">Tüm Operatörler</option>
+                                    ${this.operators.map(op => `<option value="${op.name}" ${this.filters.operator === op.name ? 'selected' : ''}>${op.name}</option>`).join('')}
+                                </select>
+                                <select id="reasonFilter" class="border rounded-lg px-3 py-2">
+                                    <option value="">Tüm Nedenler</option>
+                                    ${this.downtimeReasons.map(reason => `<option value="${reason}" ${this.filters.reason === reason ? 'selected' : ''}>${reason}</option>`).join('')}
+                                </select>
+                                <select id="floorFilter" class="border rounded-lg px-3 py-2">
+                                    <option value="">Tüm Bantlar</option>
+                                    ${this.floors.map(floor => `<option value="${floor}" ${this.filters.floor === floor ? 'selected' : ''}>${floor}</option>`).join('')}
+                                </select>
+                                <input type="date" id="startDateFilter" value="${this.filters.startDate}" class="border rounded-lg px-3 py-2" />
+                                <input type="date" id="endDateFilter" value="${this.filters.endDate}" class="border rounded-lg px-3 py-2" />
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                            <div class="p-6 border-b">
+                                <h3 class="text-lg font-medium">Duruş Kayıtları (${filteredData.length})</h3>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Süre</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Neden</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bant</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Yorum</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">İşlemler</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200">
+                                        ${filteredData.map(downtime => `
+                                            <tr class="${downtime.duration > 30 ? 'bg-red-50' : ''}">
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                                    ${downtime.operatorName}
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                    ${downtime.startTime.toLocaleDateString('tr-TR')} ${downtime.startTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })} - ${downtime.endTime ? downtime.endTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : 'Devam ediyor'}
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                    <span class="${downtime.duration > 30 ? 'text-red-600 font-medium' : ''}">
+                                                        ${this.formatDuration(downtime.duration)}
+                                                    </span>
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                    ${downtime.reason}
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                    ${downtime.floor}
+                                                </td>
+                                                <td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
+                                                    ${downtime.comment || '-'}
+                                                </td>
+                                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                    <button 
+                                                        class="delete-btn bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs transition-colors flex items-center space-x-1"
+                                                        data-id="${downtime.id}"
+                                                        title="Duruşu Sil"
+                                                    >
+                                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                                        </svg>
+                                                        <span>Sil</span>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                                ${filteredData.length === 0 ? `
+                                    <div class="text-center py-12 text-gray-500">
+                                        Henüz duruş kaydı bulunmuyor.
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            attachEventListeners() {
+                // Login
+                const pinInput = document.getElementById('pinInput');
+                const loginBtn = document.getElementById('loginBtn');
+                
+                if (pinInput && loginBtn) {
+                    pinInput.addEventListener('keypress', (e) => {
+                        if (e.key === 'Enter') {
+                            this.handleLogin(pinInput.value);
+                            pinInput.value = '';
+                        }
+                    });
+                    
+                    loginBtn.addEventListener('click', () => {
+                        this.handleLogin(pinInput.value);
+                        pinInput.value = '';
+                    });
+                }
+
+                // Logout
+                const logoutBtn = document.getElementById('logoutBtn');
+                if (logoutBtn) {
+                    logoutBtn.addEventListener('click', () => {
+                        this.handleLogout();
+                    });
+                }
+
+                // Start Downtime
+                const startDowntimeBtn = document.getElementById('startDowntimeBtn');
+                if (startDowntimeBtn) {
+                    startDowntimeBtn.addEventListener('click', () => {
+                        this.showStartDowntimeModal();
+                    });
+                }
+
+                // End Downtime
+                const endDowntimeBtn = document.getElementById('endDowntimeBtn');
+                if (endDowntimeBtn) {
+                    endDowntimeBtn.addEventListener('click', () => {
+                        this.showEndDowntimeModal();
+                    });
+                }
+
+                // Export
+                const exportBtn = document.getElementById('exportBtn');
+                if (exportBtn) {
+                    exportBtn.addEventListener('click', () => {
+                        this.exportToExcel();
+                    });
+                }
+
+                // Delete buttons
+              
+                deleteButtons.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const downtimeId = btn.getAttribute('data-id');
+                        this.deleteDowntime(downtimeId);
+                    });
+                });
+                const reasonFilter = document.getElementById('reasonFilter');
+                const floorFilter = document.getElementById('floorFilter');
+                const startDateFilter = document.getElementById('startDateFilter');
+                const endDateFilter = document.getElementById('endDateFilter');
+
+                if (operatorFilter) {
+                    operatorFilter.addEventListener('change', (e) => {
+                        this.filters.operator = e.target.value;
+                        this.render();
+                    });
+                }
+
+                // Delete buttons
+                const deleteButtons = document.querySelectorAll('.delete-btn');
+                deleteButtons.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const downtimeId = btn.getAttribute('data-id');
+                        this.deleteDowntime(downtimeId);
+                    });
+                });
+
+                if (reasonFilter) {
+                    reasonFilter.addEventListener('change', (e) => {
+                        this.filters.reason = e.target.value;
+                        this.render();
+                    });
+                }
+
+                if (floorFilter) {
+                    floorFilter.addEventListener('change', (e) => {
+                        this.filters.floor = e.target.value;
+                        this.render();
+                    });
+                }
+
+                if (startDateFilter) {
+                    startDateFilter.addEventListener('change', (e) => {
+                        this.filters.startDate = e.target.value;
+                        this.render();
+                    });
+                }
+
+                if (endDateFilter) {
+                    endDateFilter.addEventListener('change', (e) => {
+                        this.filters.endDate = e.target.value;
+                        this.render();
+                    });
+                }
+            }
+
+            showStartDowntimeModal() {
+                const modal = document.createElement('div');
+                modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50';
+                modal.innerHTML = `
+                    <div class="bg-white rounded-xl p-6 w-full max-w-md">
+                        <h3 class="text-lg font-bold mb-4">Duruş Başlat</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Duruş Nedeni</label>
+                                <select id="modalReason" class="w-full border rounded-lg px-3 py-2">
+                                    <option value="">Seçiniz...</option>
+                                    ${this.downtimeReasons.map(reason => `<option value="${reason}">${reason}</option>`).join('')}
+                                </select>
+                            </div>
+                                            <div>
+                                                <label class="block text-sm font-medium mb-2">Bant</label>
+                                                <select id="modalFloor" class="w-full border rounded-lg px-3 py-2">
+                                                    <option value="">Seçiniz...</option>
+                                                    ${this.floors.map(floor => `<option value="${floor}">${floor}</option>`).join('')}
+                                                </select>
+                                            </div>
+                            <div class="flex space-x-3">
+                                <button id="modalCancel" class="flex-1 bg-gray-300 text-gray-700 py-2 rounded-lg hover:bg-gray-400 transition-colors">
+                                    İptal
+                                </button>
+                                <button id="modalStart" class="flex-1 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                                    Başlat
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+
+                const modalReason = document.getElementById('modalReason');
+                const modalFloor = document.getElementById('modalFloor');
+                const modalCancel = document.getElementById('modalCancel');
+                const modalStart = document.getElementById('modalStart');
+
+                modalCancel.addEventListener('click', () => {
+                    document.body.removeChild(modal);
+                });
+
+                modalStart.addEventListener('click', () => {
+                    if (modalReason.value && modalFloor.value) {
+                        this.startDowntime(modalReason.value, modalFloor.value);
+                        document.body.removeChild(modal);
+                    } else {
+                        alert('Lütfen tüm alanları doldurun!');
+                    }
+                });
+
+                // Click outside to close
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) {
+                        document.body.removeChild(modal);
+                    }
+                });
+            }
+
+            showEndDowntimeModal() {
+                const modal = document.createElement('div');
+                modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50';
+                modal.innerHTML = `
+                    <div class="bg-white rounded-xl p-6 w-full max-w-md">
+                        <h3 class="text-lg font-bold mb-4">Duruşu Bitir</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Açıklama</label>
+                                <textarea id="modalComment" class="w-full border rounded-lg px-3 py-2 h-24 resize-none" placeholder="Duruş ile ilgili kısa açıklama yazınız..."></textarea>
+                            </div>
+                            <div class="flex space-x-3">
+                                <button id="modalCancel" class="flex-1 bg-gray-300 text-gray-700 py-2 rounded-lg hover:bg-gray-400 transition-colors">
+                                    İptal
+                                </button>
+                                <button id="modalEnd" class="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 transition-colors">
+                                    Bitir
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+
+                const modalComment = document.getElementById('modalComment');
+                const modalCancel = document.getElementById('modalCancel');
+                const modalEnd = document.getElementById('modalEnd');
+
+                modalCancel.addEventListener('click', () => {
+                    document.body.removeChild(modal);
+                });
+
+                modalEnd.addEventListener('click', () => {
+                    this.endDowntime(modalComment.value);
+                    document.body.removeChild(modal);
+                });
+
+                // Click outside to close
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) {
+                        document.body.removeChild(modal);
+                    }
+                });
+            }
+        }
+
+        // Initialize app when page loads
+        let app; // Global app instance
+        window.addEventListener('DOMContentLoaded', () => {
+            app = new MontajHattiApp();
+        });
+    </script>
+</body>
+</html>gray-500 uppercase">Operatör</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Başlangıç</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Bitiş</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-

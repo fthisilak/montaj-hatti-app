@@ -1,0 +1,43 @@
+{
+  "name": "Montaj Hattı Takip Sistemi",
+  "short_name": "Montaj Takip",
+  "description": "Operatör duruş takip ve yönetim sistemi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "tr",
+  "categories": ["productivity", "business"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Duruş Başlat",
+      "short_name": "Duruş",
+      "description": "Hızlı duruş başlatma",
+      "url": "/?action=start",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Raporlar",
+      "short_name": "Rapor", 
+      "description": "Duruş raporlarını görüntüle",
+      "url": "/?action=admin",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
